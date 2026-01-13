@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Plantilla que crea una VPC y una Subnet solicitando los CIDR y nombres como parámetros"
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Description: "CIDR de la VPC (por ejemplo 10.0.0.0/16)"
+    Default: "10.0.0.0/16"
+    ConstraintDescription: "Debe ser un bloque CIDR válido, por ejemplo 10.0.0.0/16"
+
+  VpcName:
+    Type: String
+    Description: "Nombre de la VPC"
+    Default: "Mi-VPC-XAVI"
+
+  SubnetCidr:
+    Type: String
+    Description: "CIDR de la Subnet (por ejemplo 10.0.1.0/24)"
+    Default: "10.0.1.0/24"
+    ConstraintDescription: "Debe ser un bloque CIDR válido dentro del rango de la VPC"
+
+  SubnetName:
+    Type: String
+    Description: "Nombre de la Subnet"
+    Default: "Subnet-1"
+
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: "Name"
+          Value: !Ref VpcName
+
+  Subnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: "Name"
+          Value: !Ref SubnetName
+
+Outputs:
+  VpcId:
+    Description: "ID de la VPC creada"
+    Value: !Ref VPC
+
+  SubnetId:
+    Description: "ID de la Subnet creada"
+    Value: !Ref Subnet
+
+  VpcName:
+    Description: "Nombre asignado a la VPC"
+    Value: !Ref VpcName
+
+  SubnetName:
+    Description: "Nombre asignado a la Subnet"
+    Value: !Ref SubnetName
