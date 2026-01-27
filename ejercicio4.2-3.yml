@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ALB y Auto Scaling Group multi-AZ con esquema condicional'
+
+Parameters:
+  ALBPublico:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: 'Determina si el ALB es público (internet-facing) o interno'
+  
+  NombreRecurso:
+    Type: String
+    Default: 'vivalandingzone'
+    Description: 'Nombre base para los recursos (solo ASCII)'
+  
+  MiNombre:
+    Type: String
+    Default: 'XaviGarcia'
+    Description: 'Tu nombre para combinar con el nombre del recurso'
+  
+  KeyPairName:
+    Type: String
+    Default: 'vockey'
+    Description: 'Key Pair para las instancias EC2'
+
+Conditions:
+  EsALBPublico: !Equals [!Ref ALBPublico, 'true']
+
+Resources:
+  # VPC
+  MiVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'VPC']]
+
+  # Internet Gateway
+  MiInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: EsALBPublico
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'IGW']]
+
+  # Attachment IGW
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: EsALBPublico
+    Properties:
+      VpcId: !Ref MiVPC
+      InternetGatewayId: !Ref MiInternetGateway
+
+  # Subredes en múltiples AZs
+  SubredPublica1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: !If [EsALBPublico, true, false]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'Subnet1']]
+
+  SubredPublica2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: !If [EsALBPublico, true, false]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'Subnet2']]
+
+  # Route Table
+  RouteTablePublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MiVPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'RT']]
+
+  # Ruta a Internet (solo si es público)
+  RutaInternet:
+    Type: AWS::EC2::Route
+    Condition: EsALBPublico
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTablePublica
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref MiInternetGateway
+
+  # Asociaciones Route Table
+  AsociacionSubred1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublica1
+      RouteTableId: !Ref RouteTablePublica
+
+  AsociacionSubred2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublica2
+      RouteTableId: !Ref RouteTablePublica
+
+  # Security Group para ALB
+  SecurityGroupALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security Group para ALB'
+      VpcId: !Ref MiVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !If [EsALBPublico, '0.0.0.0/0', '10.0.0.0/16']
+          Description: !If [EsALBPublico, 'HTTP desde Internet', 'HTTP desde VPC']
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !If [EsALBPublico, '0.0.0.0/0', '10.0.0.0/16']
+          Description: !If [EsALBPublico, 'HTTPS desde Internet', 'HTTPS desde VPC']
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'SG-ALB']]
+
+  # Security Group para instancias EC2
+  SecurityGroupInstancias:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security Group para instancias'
+      VpcId: !Ref MiVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref SecurityGroupALB
+          Description: 'HTTP desde ALB'
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !If [EsALBPublico, '0.0.0.0/0', '10.0.0.0/16']
+          Description: 'SSH'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'SG-Instances']]
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'ALB']]
+      Scheme: !If [EsALBPublico, 'internet-facing', 'internal']
+      Type: application
+      Subnets:
+        - !Ref SubredPublica1
+        - !Ref SubredPublica2
+      SecurityGroups:
+        - !Ref SecurityGroupALB
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'ALB']]
+        - Key: Scheme
+          Value: !If [EsALBPublico, 'internet-facing', 'internal']
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'TG']]
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref MiVPC
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'TG']]
+
+  # Listener para ALB
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'LT']]
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+        InstanceType: t3.micro
+        KeyName: !Ref KeyPairName
+        SecurityGroupIds:
+          - !Ref SecurityGroupInstancias
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<h1>${NombreRecurso} - ${MiNombre}</h1>" > /var/www/html/index.html
+            echo "<p>Instancia: $(curl -s http://169.254.169.254/latest/meta-data/instance-id)</p>" >> /var/www/html/index.html
+            echo "<p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>" >> /var/www/html/index.html
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'Instance']]
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'ASG']]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 6
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref SubredPublica1
+        - !Ref SubredPublica2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre, 'ASG']]
+          PropagateAtLaunch: true
+
+Outputs:
+  VPCId:
+    Description: 'ID de la VPC'
+    Value: !Ref MiVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  ALBDNSName:
+    Description: 'DNS Name del Application Load Balancer'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALB-DNS'
+
+  ALBScheme:
+    Description: 'Esquema del ALB (internet-facing o internal)'
+    Value: !If [EsALBPublico, 'internet-facing', 'internal']
+
+  ALBURL:
+    Description: 'URL del Application Load Balancer'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+
+  AutoScalingGroupName:
+    Description: 'Nombre del Auto Scaling Group'
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ASG-Name'
+
+  NombreCompleto:
+    Description: 'Nombre completo de los recursos'
+    Value: !Join ['-', [!Ref NombreRecurso, !Ref MiNombre]]
+
+  ZonasDisponibilidad:
+    Description: 'Zonas de disponibilidad utilizadas'
+    Value: !Join
+      - ', '
+      - - !Select [0, !GetAZs '']
+        - !Select [1, !GetAZs '']
+
+#aws cloudformation create-stack \
+#  --stack-name alb-publico \
+#  --template-body file://alb-asg-multi-az.yml \
+#  --parameters ParameterKey=ALBPublico,ParameterValue=true \
+#               ParameterKey=NombreRecurso,ParameterValue=vivalandingzone \
+#               ParameterKey=MiNombre,ParameterValue=XaviGarcia \
+#               ParameterKey=KeyPairName,ParameterValue=vockey
+#
+#
+#
+#aws cloudformation create-stack \
+#  --stack-name alb-interno \
+#  --template-body file://alb-asg-multi-az.yml \
+#  --parameters ParameterKey=ALBPublico,ParameterValue=false \
+#               ParameterKey=NombreRecurso,ParameterValue=vivalandingzone \
+#               ParameterKey=MiNombre,ParameterValue=XaviGarcia \
+#               ParameterKey=KeyPairName,ParameterValue=vockey
+#

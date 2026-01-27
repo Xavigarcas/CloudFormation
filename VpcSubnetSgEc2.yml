@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Plantilla que crea una VPC, una Subnet y una instancia EC2"
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Description: "CIDR de la VPC (por ejemplo 192.168.0.0/20)"
+    Default: "192.168.0.0/20"
+
+  VpcName:
+    Type: String
+    Description: "Nombre de la VPC"
+    Default: "Mi-VPC-XAVI"
+
+  SubnetCidr:
+    Type: String
+    Description: "CIDR de la Subnet (por ejemplo 192.168.1.0/24)"
+    Default: "192.168.1.0/24"
+
+  SubnetName:
+    Type: String
+    Description: "Nombre de la Subnet"
+    Default: "Subnet-1"
+
+  InstanceType:
+    Type: String
+    Description: "Tipo de instancia EC2"
+    Default: "t3.micro"
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Key Pair para acceso SSH"
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: "AMI fija para la instancia EC2"
+    Default: "ami-07ff62358b87c7116"  # <-- pon aquí tu AMI de la región
+
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: "Name"
+          Value: !Ref VpcName
+
+  Subnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: 
+        !Select 
+          - 0
+          - !GetAZs ""
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: "Name"
+          Value: !Ref SubnetName
+
+  InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Permite SSH"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: "Name"
+          Value: "EC2-SG"
+
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      ImageId: !Ref AmiId
+      Tags:
+        - Key: "Name"
+          Value: "EC2-Subnet-Instance"
+
+Outputs:
+  VpcId:
+    Description: "ID de la VPC"
+    Value: !Ref VPC
+
+  SubnetId:
+    Description: "ID de la Subnet"
+    Value: !Ref Subnet
+
+  EC2InstanceId:
+    Description: "ID de la instancia EC2"
+    Value: !Ref EC2Instance

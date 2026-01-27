@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Part 2 - Add a MySQL database with CloudFormation - Security Groups Chained
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC ID where resources will be created"
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: "Availability Zone for the EC2 instance"
+  EnvironmentType:
+    Description: "Specify the Environment type of the stack."
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+  AmiID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: "The ID of the AMI."
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  KeyPairName:
+    Type: String
+    Description: The name of an existing Amazon EC2 key pair in this region to use to SSH into the Amazon EC2 instances.
+
+  DBInstanceIdentifier:
+    Type: String
+    Default: "webapp-db"
+    Description: "Identifier for the RDS instance"
+  DBUsername:
+    NoEcho: true
+    Description: Username for MySQL database access
+    Type: String
+    MinLength: 1
+    MaxLength: 16
+    Default: "mysqladmin"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: true
+    Description: Password for MySQL database access
+    Type: String
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: must contain only alphanumeric characters.
+  DBName:
+    Description: Name of the MySQL database
+    Type: String
+    Default: "webapp"
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+
+Mappings:
+  EnvironmentToInstanceType:
+    dev:
+      InstanceType: t2.nano
+    test:
+      InstanceType: t2.micro
+    prod:
+      InstanceType: t2.small
+
+Resources:
+  # Security Group para la instancia EC2 (Web Server)
+  WebAppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ["-", [webapp-sg, !Ref EnvironmentType]]
+      GroupDescription: "Security group for EC2 web server - allows HTTP/HTTPS and SSH"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "HTTP access from Internet"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: "HTTPS access from Internet"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: "SSH access from Internet"
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [webapp-sg, !Ref EnvironmentType]]
+
+  # Security Group para la base de datos RDS (ENCADENADO)
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ["-", [database-sg, !Ref EnvironmentType]]
+      GroupDescription: "Security group for RDS database - only allows access from EC2 instances"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref WebAppSecurityGroup
+          Description: "MySQL access only from WebApp EC2 instances"
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [database-sg, !Ref EnvironmentType]]
+
+  # Instancia EC2
+  WebAppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      ImageId: !Ref AmiID
+      InstanceType:
+        !FindInMap [
+          EnvironmentToInstanceType,
+          !Ref EnvironmentType,
+          InstanceType,
+        ]
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds:
+        - !Ref WebAppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [webapp-instance, !Ref EnvironmentType]]
+
+  # Elastic IP para la EC2
+  WebAppEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref WebAppInstance
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [webapp-eip, !Ref EnvironmentType]]
+
+  # Instancia RDS MySQL
+  WebAppDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceIdentifier
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "mon:04:00-mon:05:00"
+      PubliclyAccessible: false
+      StorageType: gp3
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [webapp-rds, !Ref EnvironmentType]]
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub http://${WebAppEIP}
+    Description: WebApp URL
+
+  WebServerPublicDNS:
+    Description: "Public DNS of EC2 instance"
+    Value: !GetAtt WebAppInstance.PublicDnsName
+
+  WebServerPublicIP:
+    Description: "Public IP of EC2 instance (Elastic IP)"
+    Value: !Ref WebAppEIP
+
+  WebAppSecurityGroupId:
+    Description: "Security Group ID for the EC2 instance"
+    Value: !Ref WebAppSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-WebAppSG"
+
+  DatabaseSecurityGroupId:
+    Description: "Security Group ID for the RDS database"
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSG"
+
+  WebAppDatabaseEndpoint:
+    Description: "Connection endpoint for the database"
+    Value: !GetAtt WebAppDatabase.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-DBEndpoint"
+
+  WebAppDatabasePort:
+    Description: "Database connection port"
+    Value: !GetAtt WebAppDatabase.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-DBPort"
+
+  DatabaseConnectionString:
+    Description: "Complete database connection string (use from EC2 only)"
+    Value: !Sub "mysql://${DBUsername}@${WebAppDatabase.Endpoint.Address}:${WebAppDatabase.Endpoint.Port}/${DBName}"
+
+  
+#aws ec2 describe-vpcs \
+#--filters "Name=isDefault,Values=true" \
+#--query 'Vpcs[0].VpcId' \
+#--output text
+#
+#
+#aws cloudformation create-stack \
+#--stack-name stackprueba \
+#--template-body file://ejercicio4-1mysql.yml \
+#--parameters \
+#  ParameterKey=VpcId,ParameterValue=vpc-01dec7b58b33268b1 \
+#  ParameterKey=AvailabilityZone,ParameterValue=us-east-1a \
+#  ParameterKey=EnvironmentType,ParameterValue=dev \
+#  ParameterKey=KeyPairName,ParameterValue=vockey \
+#  ParameterKey=DBUsername,ParameterValue=mysqladmin \
+#  ParameterKey=DBPassword,ParameterValue=adminadmin \
+#  ParameterKey=DBName,ParameterValue=webapp
+#

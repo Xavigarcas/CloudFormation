@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC con subred pública e instancia EC2 condicional - Ejercicio completo con Conditions, Rules y funciones intrínsecas'
+
+Parameters:
+  CrearInstancia:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: 'Determina si se crea la instancia EC2 (true/false)'
+  
+  TipoInstancia:
+    Type: String
+    Default: 't3.micro'
+    Description: 'Tipo de instancia EC2 permitido'
+  
+  KeyPairName:
+    Type: String
+    Description: 'Nombre del Key Pair para SSH'
+    Default: 'vockey'
+  
+  MiNombre:
+    Type: String
+    Default: 'XaviGarcia'
+    Description: 'Tu nombre para formar el nombre del recurso'
+
+Rules:
+  ValidarTipoInstancia:
+    Assertions:
+      - Assert: !Or
+          - !Equals [!Ref TipoInstancia, 't3.micro']
+          - !Equals [!Ref TipoInstancia, 't3.small']
+          - !Equals [!Ref TipoInstancia, 't3.medium']
+        AssertDescription: 'El tipo de instancia debe ser t3.micro, t3.small o t3.medium'
+
+Conditions:
+  DebeCrearInstancia: !Equals [!Ref CrearInstancia, 'true']
+
+Resources:
+  # VPC
+  MiVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - 'VPC'
+              - !Ref AWS::Region
+              - !Ref MiNombre
+
+  # Internet Gateway
+  MiInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - 'IGW'
+              - !Ref AWS::Region
+              - !Ref MiNombre
+
+  # Attachment del Internet Gateway a la VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MiVPC
+      InternetGatewayId: !Ref MiInternetGateway
+
+  # Subred Pública
+  SubredPublica:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - 'SubredPublica'
+              - !Ref AWS::Region
+              - !Ref MiNombre
+
+  # Route Table para subred pública
+  RouteTablePublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MiVPC
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - 'RT-Publica'
+              - !Ref AWS::Region
+              - !Ref MiNombre
+
+  # Ruta hacia Internet Gateway
+  RutaInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTablePublica
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref MiInternetGateway
+
+  # Asociación de Route Table con subred pública
+  AsociacionSubredPublica:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublica
+      RouteTableId: !Ref RouteTablePublica
+
+  # Security Group para la instancia
+  SecurityGroupInstancia:
+    Type: AWS::EC2::SecurityGroup
+    Condition: DebeCrearInstancia
+    Properties:
+      GroupDescription: 'Security Group para instancia EC2'
+      VpcId: !Ref MiVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+          Description: 'SSH access'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+          Description: 'HTTP access'
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - 'SG'
+              - !Ref AWS::Region
+              - !Ref MiNombre
+
+  # Instancia EC2 (CONDICIONAL)
+  MiInstanciaEC2:
+    Type: AWS::EC2::Instance
+    Condition: DebeCrearInstancia
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+      InstanceType: !Ref TipoInstancia
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubredPublica
+      SecurityGroupIds:
+        - !Ref SecurityGroupInstancia
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref AWS::Region
+              - 'EC2-Instance'
+              - !Ref MiNombre
+        - Key: VPCID
+          Value: !GetAtt MiVPC.VpcId
+        - Key: Environment
+          Value: 'Development'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Instancia creada en ${AWS::Region}</h1>" > /var/www/html/index.html
+          echo "<p>VPC ID: ${MiVPC}</p>" >> /var/www/html/index.html
+          echo "<p>Nombre: ${MiNombre}</p>" >> /var/www/html/index.html
+
+Outputs:
+  VPCId:
+    Description: 'ID de la VPC creada'
+    Value: !Ref MiVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  SubredPublicaId:
+    Description: 'ID de la subred pública'
+    Value: !Ref SubredPublica
+    Export:
+      Name: !Sub '${AWS::StackName}-SubredPublica-ID'
+
+  ZonaDisponibilidad:
+    Description: 'Zona de disponibilidad utilizada'
+    Value: !Select
+      - 0
+      - !GetAZs ''
+
+  InstanciaId:
+    Condition: DebeCrearInstancia
+    Description: 'ID de la instancia EC2 creada'
+    Value: !Ref MiInstanciaEC2
+    Export:
+      Name: !Sub '${AWS::StackName}-Instancia-ID'
+
+  IPPublicaInstancia:
+    Condition: DebeCrearInstancia
+    Description: 'IP pública de la instancia EC2'
+    Value: !GetAtt MiInstanciaEC2.PublicIp
+
+  NombreRecursoCompleto:
+    Condition: DebeCrearInstancia
+    Description: 'Nombre completo del recurso formado con Fn::Join'
+    Value: !Join
+      - '-'
+      - - !Ref AWS::Region
+        - 'EC2-Instance'
+        - !Ref MiNombre
+
+  URLAplicacion:
+    Condition: DebeCrearInstancia
+    Description: 'URL de la aplicación web'
+    Value: !Sub 'http://${MiInstanciaEC2.PublicIp}'
+
+  VPCIdFromTag:
+    Condition: DebeCrearInstancia
+    Description: 'VPC ID obtenido usando GetAtt'
+    Value: !GetAtt MiVPC.VpcId
+
+#aws cloudformation create-stack \
+#  --stack-name mi-vpc-stack-v2 \
+#  --template-body file://vpc-instancia-condicional.yml \
+#  --parameters ParameterKey=CrearInstancia,ParameterValue=true \
+#               ParameterKey=TipoInstancia,ParameterValue=t3.micro \
+#               ParameterKey=KeyPairName,ParameterValue=vockey \
+#               ParameterKey=MiNombre,ParameterValue=XaviGarcia
+#

@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS MySQL Multi-AZ en subredes privadas con Security Group'
+
+Parameters:
+  Ambiente:
+    Type: String
+    Default: 'Dev'
+    AllowedValues:
+      - 'Dev'
+      - 'Prod'
+    Description: 'Ambiente de despliegue'
+  
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'ID de la VPC donde desplegar RDS'
+  
+  SubredPrivada1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'ID de la subred privada 1'
+  
+  SubredPrivada2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'ID de la subred privada 2'
+  
+  EngineVersion:
+    Type: String
+    Default: '8.0.39'
+    Description: 'Versión del motor MySQL'
+  
+  DBUsername:
+    Type: String
+    Default: 'admin'
+    Description: 'Usuario maestro de la base de datos'
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: 'Contraseña de la base de datos (mínimo 8 caracteres)'
+
+Mappings:
+  AmbienteConfig:
+    Dev:
+      InstanceClass: 'db.t3.micro'
+      AllocatedStorage: 20
+      BackupRetention: 1
+    Prod:
+      InstanceClass: 'db.t3.small'
+      AllocatedStorage: 100
+      BackupRetention: 7
+
+Resources:
+  # Security Group para RDS
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security Group para RDS MySQL'
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '20.0.10.0/24'
+          Description: 'MySQL desde subred privada 1'
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '20.0.20.0/24'
+          Description: 'MySQL desde subred privada 2'
+      Tags:
+        - Key: Name
+          Value: !Sub 'RDS-SG-${Ambiente}'
+
+  # DB Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Subnet Group para RDS'
+      SubnetIds:
+        - !Ref SubredPrivada1Id
+        - !Ref SubredPrivada2Id
+      Tags:
+        - Key: Name
+          Value: !Sub 'RDS-SubnetGroup-${Ambiente}'
+
+  # RDS MySQL Instance
+  MySQLDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub 'mysql-${Ambiente}'
+      DBInstanceClass: !FindInMap [AmbienteConfig, !Ref Ambiente, InstanceClass]
+      Engine: mysql
+      EngineVersion: !Ref EngineVersion
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: !FindInMap [AmbienteConfig, !Ref Ambiente, AllocatedStorage]
+      StorageType: gp2
+      MultiAZ: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      BackupRetentionPeriod: !FindInMap [AmbienteConfig, !Ref Ambiente, BackupRetention]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'MySQL-${Ambiente}'
+        - Key: Environment
+          Value: !Ref Ambiente
+
+Outputs:
+  RDSEndpoint:
+    Description: 'Endpoint de la base de datos RDS'
+    Value: !GetAtt MySQLDatabase.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-RDS-Endpoint'
+
+  RDSPort:
+    Description: 'Puerto de la base de datos RDS'
+    Value: !GetAtt MySQLDatabase.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-RDS-Port'
+
+  DBInstanceId:
+    Description: 'ID de la instancia RDS'
+    Value: !Ref MySQLDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-RDS-ID'
+
+  SecurityGroupId:
+    Description: 'ID del Security Group de RDS'
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-RDS-SG-ID'
+
+  ConnectionString:
+    Description: 'String de conexión MySQL'
+    Value: !Sub 'mysql://${DBUsername}@${MySQLDatabase.Endpoint.Address}:${MySQLDatabase.Endpoint.Port}'
+
+# Comando para desplegar:
+# aws cloudformation create-stack \
+#   --stack-name rds-mysql \
+#   --template-body file://ejercicio4.3-2.yml \
+#   --parameters ParameterKey=Ambiente,ParameterValue=Dev \
+#                ParameterKey=VPCId,ParameterValue=vpc-xxxxxxxxx \
+#                ParameterKey=SubredPrivada1Id,ParameterValue=subnet-xxxxxxxxx \
+#                ParameterKey=SubredPrivada2Id,ParameterValue=subnet-yyyyyyyyy \
+#                ParameterKey=DBPassword,ParameterValue=adminadmin

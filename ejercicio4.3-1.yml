@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC completa con subredes públicas/privadas, NAT Gateway, Internet Gateway y VPC Peering'
+
+Parameters:
+  Ambiente:
+    Type: String
+    Default: 'Dev'
+    AllowedValues:
+      - 'Dev'
+      - 'Prod'
+    Description: 'Ambiente de despliegue'
+  
+  SubredPublica1CIDR:
+    Type: String
+    Default: '20.0.1.0/24'
+    Description: 'CIDR para subred pública 1'
+  
+  SubredPublica2CIDR:
+    Type: String
+    Default: '20.0.2.0/24'
+    Description: 'CIDR para subred pública 2'
+  
+  SubredPrivada1CIDR:
+    Type: String
+    Default: '20.0.10.0/24'
+    Description: 'CIDR para subred privada 1'
+  
+  SubredPrivada2CIDR:
+    Type: String
+    Default: '20.0.20.0/24'
+    Description: 'CIDR para subred privada 2'
+  
+  VPCDestinoId:
+    Type: String
+    Description: 'ID de la VPC destino para VPC Peering'
+
+Mappings:
+  AmbienteCIDR:
+    Dev:
+      VPC: '20.0.0.0/16'
+    Prod:
+      VPC: '20.0.0.0/16'
+
+Resources:
+  # VPC Principal
+  MiVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [AmbienteCIDR, !Ref Ambiente, VPC]
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'VPC-${Ambiente}'
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'IGW-${Ambiente}'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MiVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subredes Públicas
+  SubredPublica1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: !Ref SubredPublica1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'SubredPublica1-${Ambiente}'
+
+  SubredPublica2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: !Ref SubredPublica2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'SubredPublica2-${Ambiente}'
+
+  # Subredes Privadas
+  SubredPrivada1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: !Ref SubredPrivada1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'SubredPrivada1-${Ambiente}'
+
+  SubredPrivada2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MiVPC
+      CidrBlock: !Ref SubredPrivada2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub 'SubredPrivada2-${Ambiente}'
+
+  # Elastic IP para NAT Gateway
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'EIP-NAT-${Ambiente}'
+
+  # NAT Gateway
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref SubredPublica1
+      Tags:
+        - Key: Name
+          Value: !Sub 'NAT-${Ambiente}'
+
+  # Tabla de Enrutamiento Pública
+  TablaRutasPublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MiVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'RT-Publica-${Ambiente}'
+
+  RutaPublica:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref TablaRutasPublica
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  # Asociaciones Subredes Públicas
+  AsociacionSubredPublica1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublica1
+      RouteTableId: !Ref TablaRutasPublica
+
+  AsociacionSubredPublica2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPublica2
+      RouteTableId: !Ref TablaRutasPublica
+
+  # Tabla de Enrutamiento Privada
+  TablaRutasPrivada:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MiVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'RT-Privada-${Ambiente}'
+
+  RutaPrivada:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TablaRutasPrivada
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NATGateway
+
+  # Asociaciones Subredes Privadas
+  AsociacionSubredPrivada1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPrivada1
+      RouteTableId: !Ref TablaRutasPrivada
+
+  AsociacionSubredPrivada2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubredPrivada2
+      RouteTableId: !Ref TablaRutasPrivada
+
+  # VPC Peering Connection
+  VPCPeeringConnection:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !Ref MiVPC
+      PeerVpcId: !Ref VPCDestinoId
+      Tags:
+        - Key: Name
+          Value: !Sub 'VPC-Peering-${Ambiente}'
+
+Outputs:
+  VPCId:
+    Description: 'ID de la VPC'
+    Value: !Ref MiVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  SubredPublica1Id:
+    Description: 'ID de la Subred Pública 1'
+    Value: !Ref SubredPublica1
+    Export:
+      Name: !Sub '${AWS::StackName}-SubredPublica1-ID'
+
+  SubredPublica2Id:
+    Description: 'ID de la Subred Pública 2'
+    Value: !Ref SubredPublica2
+    Export:
+      Name: !Sub '${AWS::StackName}-SubredPublica2-ID'
+
+  SubredPrivada1Id:
+    Description: 'ID de la Subred Privada 1'
+    Value: !Ref SubredPrivada1
+    Export:
+      Name: !Sub '${AWS::StackName}-SubredPrivada1-ID'
+
+  SubredPrivada2Id:
+    Description: 'ID de la Subred Privada 2'
+    Value: !Ref SubredPrivada2
+    Export:
+      Name: !Sub '${AWS::StackName}-SubredPrivada2-ID'
+
+  NATGatewayId:
+    Description: 'ID del NAT Gateway'
+    Value: !Ref NATGateway
+    Export:
+      Name: !Sub '${AWS::StackName}-NAT-ID'
+
+  VPCPeeringConnectionId:
+    Description: 'ID de la conexión VPC Peering'
+    Value: !Ref VPCPeeringConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCPeering-ID'
+
+  InternetGatewayId:
+    Description: 'ID del Internet Gateway'
+    Value: !Ref InternetGateway
+    Export:
+      Name: !Sub '${AWS::StackName}-IGW-ID'
+
+# Comando para desplegar:
+# aws cloudformation create-stack \
+#   --stack-name vpc-completa \
+#   --template-body file://ejercicio4-3.1.yml \
+#   --parameters ParameterKey=Ambiente,ParameterValue=Dev \
+#                ParameterKey=VPCDestinoId,ParameterValue=vpc-xxxxxxxxx

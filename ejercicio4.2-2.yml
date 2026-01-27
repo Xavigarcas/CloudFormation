@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC con 2 subredes en diferentes regiones usando Mappings, seleccion dinamica de AZ y condicional para IGW'
+
+Parameters:
+  AttachInternetGateway:
+    Type: String
+    Description: 'Determina si se debe adjuntar un Internet Gateway a la VPC'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      VPCCidr: '10.0.0.0/20'
+      Subnet1Cidr: '10.0.0.0/24'
+      Subnet2Cidr: '10.0.1.0/24'
+    us-west-2:
+      VPCCidr: '172.16.0.0/20'
+      Subnet1Cidr: '172.16.0.0/24'
+      Subnet2Cidr: '172.16.1.0/24'
+
+Conditions:
+  ShouldAttachIGW: !Equals 
+    - !Ref AttachInternetGateway
+    - 'true'
+
+Resources:
+  # VPC Principal
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [RegionMap, !Ref 'AWS::Region', VPCCidr]
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+        - Key: Region
+          Value: !Ref 'AWS::Region'
+
+  # Internet Gateway (Condicional)
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: ShouldAttachIGW
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+
+  # Adjuntar Internet Gateway a VPC (Condicional)
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: ShouldAttachIGW
+    Properties:
+      VpcId: !Ref MainVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subred 1 - Usando Fn::Select y GetAZs para seleccion dinamica de AZ
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: !FindInMap [RegionMap, !Ref 'AWS::Region', Subnet1Cidr]
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: !If [ShouldAttachIGW, true, false]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Subnet-1'
+
+  # Subred 2 - Segunda zona de disponibilidad
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: !FindInMap [RegionMap, !Ref 'AWS::Region', Subnet2Cidr]
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: !If [ShouldAttachIGW, true, false]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Subnet-2'
+
+  # Tabla de Rutas
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-RT'
+
+  # Ruta a Internet (Condicional)
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Condition: ShouldAttachIGW
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  # Asociar Subred 1 con Tabla de Rutas
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref RouteTable
+
+  # Asociar Subred 2 con Tabla de Rutas
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref RouteTable
+
+Outputs:
+  VPCId:
+    Description: 'ID de la VPC creada'
+    Value: !Ref MainVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  VPCCidr:
+    Description: 'CIDR de la VPC'
+    Value: !FindInMap [RegionMap, !Ref 'AWS::Region', VPCCidr]
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-CIDR'
+
+  Subnet1Id:
+    Description: 'ID de la Subred 1'
+    Value: !Ref Subnet1
+    Export:
+      Name: !Sub '${AWS::StackName}-Subnet-1-ID'
+
+  Subnet2Id:
+    Description: 'ID de la Subred 2'
+    Value: !Ref Subnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-Subnet-2-ID'
+
+  InternetGatewayId:
+    Condition: ShouldAttachIGW
+    Description: 'ID del Internet Gateway'
+    Value: !Ref InternetGateway
+    Export:
+      Name: !Sub '${AWS::StackName}-IGW-ID'
+
+  HasInternetGateway:
+    Description: 'Indica si la VPC tiene Internet Gateway adjunto'
+    Value: !Ref AttachInternetGateway
+
+  AvailabilityZone1:
+    Description: 'Primera zona de disponibilidad utilizada'
+    Value: !Select [0, !GetAZs '']
+
+  AvailabilityZone2:
+    Description: 'Segunda zona de disponibilidad utilizada'
+    Value: !Select [1, !GetAZs '']
+
+  Region:
+    Description: 'Region donde se despliega la VPC'
+    Value: !Ref 'AWS::Region'
+
+#aws cloudformation create-stack \
+#  --stack-name vpc-east \
+#  --template-body file://ejercicio4.2-2.yml \
+#  --region us-east-1
+#
+#
+#aws cloudformation create-stack \
+#  --stack-name vpc-west \
+#  --template-body file://ejercicio4.2-2.yml \
+#  --parameters ParameterKey=AttachInternetGateway,ParameterValue=false \
+#  --region us-west-2
+#

@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bucket S3 con permisos específicos y configuración de almacenamiento'
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: 'Nombre del bucket S3 (debe ser único globalmente)'
+  
+  NivelAcceso:
+    Type: String
+    Default: 'Privado'
+    AllowedValues:
+      - 'Privado'
+      - 'Publico'
+    Description: 'Nivel de acceso del bucket'
+  
+  Ambiente:
+    Type: String
+    Default: 'Dev'
+    AllowedValues:
+      - 'Dev'
+      - 'Prod'
+    Description: 'Ambiente de despliegue'
+
+Conditions:
+  EsPublico: !Equals [!Ref NivelAcceso, 'Publico']
+  EsPrivado: !Equals [!Ref NivelAcceso, 'Privado']
+
+Mappings:
+  AmbienteStorage:
+    Dev:
+      StorageClass: 'STANDARD_IA'
+    Prod:
+      StorageClass: 'INTELLIGENT_TIERING'
+
+Resources:
+  # Bucket S3
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: !If [EsPublico, false, true]
+        BlockPublicPolicy: !If [EsPublico, false, true]
+        IgnorePublicAcls: !If [EsPublico, false, true]
+        RestrictPublicBuckets: !If [EsPublico, false, true]
+      LifecycleConfiguration:
+        Rules:
+          - Id: StorageClassTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: !FindInMap [AmbienteStorage, !Ref Ambiente, StorageClass]
+                TransitionInDays: 30
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${BucketName}-${Ambiente}'
+        - Key: Environment
+          Value: !Ref Ambiente
+        - Key: AccessLevel
+          Value: !Ref NivelAcceso
+
+  # Política del Bucket (solo si es público)
+  BucketPolicyPublic:
+    Type: AWS::S3::BucketPolicy
+    Condition: EsPublico
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${S3Bucket}/*'
+          - Sid: PublicListBucket
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:ListBucket'
+            Resource: !Ref S3Bucket
+
+  # Política del Bucket (solo si es privado)
+  BucketPolicyPrivate:
+    Type: AWS::S3::BucketPolicy
+    Condition: EsPrivado
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyPublicAccess
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: 
+              - !Sub 'arn:aws:s3:::${S3Bucket}'
+              - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+            Condition:
+              Bool:
+                'aws:PrincipalIsAWSService': 'false'
+              StringNotEquals:
+                'aws:PrincipalAccount': !Ref 'AWS::AccountId'
+
+Outputs:
+  BucketARN:
+    Description: 'ARN del bucket S3'
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-Bucket-ARN'
+
+  BucketName:
+    Description: 'Nombre del bucket S3'
+    Value: !Ref S3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-Bucket-Name'
+
+  UploadURL:
+    Description: 'URL para carga de archivos'
+    Value: !If 
+      - EsPublico
+      - !Sub 'https://${S3Bucket}.s3.${AWS::Region}.amazonaws.com'
+      - !Sub 'https://s3.console.aws.amazon.com/s3/buckets/${S3Bucket}'
+
+  BucketDomainName:
+    Description: 'Domain name del bucket'
+    Value: !GetAtt S3Bucket.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-Bucket-Domain'
+
+  StorageClass:
+    Description: 'Clase de almacenamiento configurada'
+    Value: !FindInMap [AmbienteStorage, !Ref Ambiente, StorageClass]
+
+  AccessLevel:
+    Description: 'Nivel de acceso del bucket'
+    Value: !Ref NivelAcceso
+
+# Comando para desplegar:
+# aws cloudformation create-stack \
+#   --stack-name s3-bucket \
+#   --template-body file://ejercicio4.3-3.yml \
+#   --parameters ParameterKey=BucketName,ParameterValue=mi-bucket-unico-123 \
+#                ParameterKey=NivelAcceso,ParameterValue=Privado \
+#                ParameterKey=Ambiente,ParameterValue=Dev
